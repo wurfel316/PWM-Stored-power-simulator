@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>PWM発電シミュレーター</title>
+<style>
+/* ライトモード(デフォルト) */
+body{
+  font-family:sans-serif;
+  background:#f4f4f4;
+  padding:20px;
+  color:#000;
+}
+.box{
+  background:#fff;
+  padding:15px;
+  border-radius:10px;
+  max-width:900px;
+}
+canvas{
+  background:#fff;
+  border:1px solid #aaa;
+  margin-top:15px;
+}
+button{
+  margin-top:10px;
+  padding:6px 12px;
+  background:#fff;
+  border:1px solid #aaa;
+  color:#000;
+  cursor:pointer;
+}
+button:hover{
+  background:#f0f0f0;
+}
+input[type="text"], input[type="number"], input:not([type]){
+  background:#fff;
+  border:1px solid #aaa;
+  color:#000;
+  padding:3px 5px;
+}
+.result{
+  margin-top:15px;
+  font-weight:bold;
+}
+.periodRow{
+  margin-bottom:5px;
+}
+
+/* ダークモード */
+@media (prefers-color-scheme: dark) {
+  body{
+    background:#1a1a1a;
+    color:#e0e0e0;
+  }
+  .box{
+    background:#2a2a2a;
+  }
+  canvas{
+    background:#1a1a1a;
+    border:1px solid #555;
+  }
+  button{
+    background:#3a3a3a;
+    border:1px solid #555;
+    color:#e0e0e0;
+  }
+  button:hover{
+    background:#4a4a4a;
+  }
+  input[type="text"], input[type="number"], input:not([type]){
+    background:#3a3a3a;
+    border:1px solid #555;
+    color:#e0e0e0;
+  }
+  input[type="checkbox"]{
+    filter: invert(1) hue-rotate(180deg);
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="box">
+<h2>PWM制御方式貯蔵電力シミュレーター</h2>
+
+<div id="periodContainer"></div>
+<button onclick="addPeriod()">＋周期追加</button>
+<br><br>
+
+発電機数 <input id="count" value="4"><br>
+出力 <input id="power" value="1100"><br>
+消費<input id="load" value="0"><br>
+初期発電(s) <input id="boost" value="40"><br>
+ON時間(s) <input id="on" value="40"><br>
+
+<label>
+<input type="checkbox" id="customTime"> シミュレーション時間を指定
+<input id="simTime" value="1000" style="width:80px" disabled> 秒
+</label><br>
+
+<button onclick="calc()">計算</button>
+
+<div id="result" class="result"></div>
+
+<canvas id="timeline" width="850" height="200"></canvas>
+
+<div style="margin:10px 0">
+<label>
+<input type="checkbox" id="linkZoom" checked> タイムラインとグラフの操作をリンク
+</label>
+<span style="margin-left:20px">
+<label>
+<input type="checkbox" id="showGrid" checked> グリッド線を表示
+<input id="gridInterval" value="40" style="width:60px"> 秒間隔
+</label>
+</span>
+</div>
+
+<canvas id="graph" width="850" height="300"></canvas>
+</div>
+
+<script>
+const CAP=100000; // 蓄電容量 100,000J (W・s)
+
+// ダークモード検出
+function isDarkMode() {
+return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+// テーマに応じた色を取得
+function getThemeColors() {
+if (isDarkMode()) {
+return {
+canvasBg: '#1a1a1a',
+text: '#e0e0e0',
+timelineText: '#333',  // タイムライン用(ダークグレー)
+gridLine: '#444',
+gridText: '#888',
+graphLine: '#4FC3F7',
+boostBar: '#42A5F5',
+normalBar: '#66BB6A',
+delayedBar: '#FFA726'
+};
+} else {
+return {
+canvasBg: '#fff',
+text: '#333',
+timelineText: '#333',  // タイムライン用(黒に近い)
+gridLine: '#e0e0e0',
+gridText: '#999',
+graphLine: '#2196F3',
+boostBar: '#2196F3',
+normalBar: '#4CAF50',
+delayedBar: '#FF9800'
+};
+}
+}
+
+// ズーム・スクロール状態を初期化
+window.graphState = {zoom: 1, offsetX: 0};
+window.timelineState = {zoom: 1, offsetX: 0};
+
+// 初期周期5つ(20, 40, 80, 160, 320)
+for(let i=0;i<5;i++) addPeriod(20 * Math.pow(2, i));
+
+function addPeriod(val){
+// valが指定されていない場合は、最後の周期の2倍を設定
+if(val === undefined){
+let existingPeriods = [...document.querySelectorAll(".period")].map(e => +e.value);
+if(existingPeriods.length > 0){
+val = Math.max(...existingPeriods) * 2;
+}else{
+val = 20; // デフォルト
+}
+}
+
+let div=document.createElement("div");
+div.className="periodRow";
+// 現在の周期数を正確にカウント
+let currentCount=periodContainer.querySelectorAll(".periodRow").length;
+div.innerHTML=`周期 ${currentCount+1}
+<input value="${val}" class="period"> 秒
+<button onclick="this.parentNode.remove();renumberPeriods()">削除</button>`;
+periodContainer.appendChild(div);
+}
+
+function renumberPeriods(){
+// 全ての周期行を取得して番号を振り直す
+let rows=periodContainer.querySelectorAll(".periodRow");
+rows.forEach((row,index)=>{
+// 入力値を保存
+let input=row.querySelector(".period");
+let value=input.value;
+// 行の内容を再構築
+row.innerHTML=`周期 ${index+1}
+<input value="${value}" class="period"> 秒
+<button onclick="this.parentNode.remove();renumberPeriods()">削除</button>`;
+});
+}
+
+function calc(){
+
+let periods=[...document.querySelectorAll(".period")]
+.map(e=>+e.value).filter(v=>v>0);
+
+if(periods.length===0)return;
+
+let count=+countEl.value;
+let power=+powerEl.value;
+let onTime=+onEl.value;
+let load=+loadEl.value;
+let boost=+boostEl.value;
+
+// シミュレーション時間の設定
+let limitTime;
+if(document.getElementById('customTime').checked){
+limitTime = +document.getElementById('simTime').value;
+}else{
+limitTime = Math.max(...periods)*2;
+}
+
+// ★ 各周期を周期時間で初期化(t=0では発火しない)
+let timers=periods.map((p)=>p);
+
+let nextMachine=0;
+let active=[];
+let events=[];
+
+let energy=CAP;
+let dead=null;
+let dropped=false;
+let recovered=false;
+let firstRecoveryTime=null;  // 1回目の回復時刻
+
+// ★ 待機キュー(発電機が足りない場合の繰越)
+let waitingQueue=[];
+
+let dt=1;
+let t=0;
+
+let energyLog=[];
+let timeLog=[];
+
+// ★ 初期発電フラグ
+let initialBoostDone = false;
+
+while(t<limitTime){
+
+// ★★ 初期発電処理(最初の1回のみ、boost秒間、boost>0の場合のみ)
+if(!initialBoostDone && boost > 0 && t === 0){
+for(let i=0;i<count;i++){
+active.push({machine:i,start:0,end:boost,isBoost:true});
+events.push({machine:i,start:0,end:boost,isBoost:true});
+}
+initialBoostDone = true;
+}
+// boost <= 0 の場合は初期発電なし
+if(boost <= 0 && !initialBoostDone){
+initialBoostDone = true;
+}
+
+// ★★ 周期イベント - 同時発火を検出
+let fireCount=0;
+timers.forEach((next,i)=>{
+if(t>=next){
+fireCount++;
+timers[i]+=periods[i];
+}
+});
+
+// ★★ 発火数に応じて発電機を割り当て
+if(fireCount>0){
+// 今すぐ使える発電機台数を確認
+let availableMachines=count-active.length;
+
+// 発火した周期のうち、発電機が使える分だけ即座に起動
+let immediateStarts=Math.min(fireCount,availableMachines);
+for(let i=0;i<immediateStarts;i++){
+active.push({machine:nextMachine,start:t,end:t+onTime});
+events.push({machine:nextMachine,start:t,end:t+onTime});
+nextMachine=(nextMachine+1)%count;
+}
+
+// 発電機が足りない分は待機キューに追加
+let overflow=fireCount-immediateStarts;
+for(let i=0;i<overflow;i++){
+waitingQueue.push(t); // 発火要求時刻を記録
+}
+}
+
+// ★★ 終了チェック & 待機キューの処理
+let justEnded=active.filter(a=>a.end<=t+dt/2);
+active=active.filter(a=>a.end>t);
+
+// 発電機が空いたら待機キューから起動
+if(justEnded.length>0 && waitingQueue.length>0){
+let freeSlots=justEnded.length;
+let toStart=Math.min(freeSlots,waitingQueue.length);
+
+for(let i=0;i<toStart;i++){
+let requestTime=waitingQueue.shift();
+active.push({machine:nextMachine,start:t,end:t+onTime});
+events.push({machine:nextMachine,start:t,end:t+onTime,delayed:true});
+nextMachine=(nextMachine+1)%count;
+}
+}
+
+// 発電量
+let gen=active.length*power;
+
+// エネルギー更新
+let prev=energy;
+energy+=(gen-load)*dt;
+
+// 減少を検出
+if(energy<prev)dropped=true;
+
+// 減少後に上限まで回復した場合(記録するが継続)
+if(dropped && energy>=CAP && prev<CAP && firstRecoveryTime===null){
+recovered=true;
+firstRecoveryTime=t;
+}
+
+// 枯渇を記録(ただしシミュレーションは継続)
+if(energy<=0 && dead===null){
+dead=t;
+}
+
+if(energy<0)energy=0;
+if(energy>CAP)energy=CAP;
+
+energyLog.push(energy);
+timeLog.push(t);
+
+t+=dt;
+}
+
+// 描画(常に全体を表示)
+let displayTime = limitTime;
+
+drawTimeline(events,count,displayTime);
+// イベント時刻での正確な貯蔵量を計算
+let exactValues = calculateExactValues(events, power, load, boost, count, onTime);
+drawGraph(energyLog,timeLog,displayTime,events,exactValues);
+
+// 再描画用に結果を保存
+lastCalcResult = {
+events: events,
+count: count,
+displayTime: displayTime,
+energyLog: energyLog,
+timeLog: timeLog,
+exactValues: exactValues
+};
+
+// 判定
+let msg="";
+if(dead!==null){
+msg=`⚠ 枯渇します — ${dead.toFixed(1)}秒 (計算予定: ${limitTime.toFixed(0)}秒)`;
+}else if(firstRecoveryTime!==null){
+msg=`✅ 安定 (回復時刻: ${firstRecoveryTime.toFixed(0)}秒、計算時間: ${limitTime.toFixed(0)}秒)`;
+}else if(dropped){
+// 一度でも減少したが回復していない = 将来枯渇
+msg=`⚠ 将来枯渇 (計算時間: ${limitTime.toFixed(0)}秒)`;
+}else{
+msg=`✅ 安定 (計算時間: ${limitTime.toFixed(0)}秒)`;
+}
+
+result.innerHTML=msg;
+}
+
+
+// ======================
+// 再描画用(シミュレーション結果を保持)
+// ======================
+let lastCalcResult = null;
+
+function redraw(){
+if(!lastCalcResult) return;
+drawTimeline(lastCalcResult.events, lastCalcResult.count, lastCalcResult.displayTime);
+drawGraph(lastCalcResult.energyLog, lastCalcResult.timeLog, lastCalcResult.displayTime, 
+          lastCalcResult.events, lastCalcResult.exactValues);
+}
+
+
+// ======================
+// イベント時刻での正確な貯蔵量計算
+// ======================
+function calculateExactValues(events, power, load, boost, count, onTime) {
+let exactValues = new Map();
+
+// イベントを時刻順にソート
+let timePoints = [];
+timePoints.push({ time: 0, type: 'initial' });
+events.forEach(e => {
+timePoints.push({ time: e.start, type: 'start', event: e });
+timePoints.push({ time: e.end, type: 'end', event: e });
+});
+timePoints.sort((a, b) => a.time - b.time);
+
+let energy = CAP;
+let activeCount = 0;
+let prevTime = 0;
+
+// 初期時刻の値を記録
+exactValues.set(0, CAP);
+
+timePoints.forEach(point => {
+if (point.time === prevTime) {
+// 同じ時刻の場合は状態更新のみ
+if (point.type === 'start') activeCount++;
+if (point.type === 'end') activeCount--;
+return;
+}
+
+// 前の時刻から現在の時刻までのエネルギー変化を計算
+let deltaTime = point.time - prevTime;
+let gen = activeCount * power;
+
+energy += (gen - load) * deltaTime;
+if (energy > CAP) energy = CAP;
+
+// このイベント時刻の値を記録
+exactValues.set(point.time, energy);
+
+// 状態を更新
+if (point.type === 'start') activeCount++;
+if (point.type === 'end') activeCount--;
+
+prevTime = point.time;
+});
+
+return exactValues;
+}
+
+
+// ======================
+// タイムライン描画
+// ======================
+function drawTimeline(events,count,limitTime){
+
+let c=timeline;
+let ctx=c.getContext("2d");
+let colors = getThemeColors();
+
+// 背景色をクリア
+ctx.fillStyle = colors.canvasBg;
+ctx.fillRect(0, 0, c.width, c.height);
+
+if(events.length===0)return;
+
+// ズーム・スクロール状態を取得
+let state = window.timelineState;
+let zoom = state.zoom;
+let offsetX = state.offsetX;
+
+// シミュレーション計画時間をベースにスケール(ズーム適用)
+let h=c.height/count;
+let baseScale=c.width/limitTime;
+let scale=baseScale*zoom;
+
+ctx.font="11px sans-serif";
+ctx.save();
+ctx.translate(-offsetX, 0);
+
+events.forEach(e=>{
+let x=e.start*scale;
+let w=(e.end-e.start)*scale;
+let y=e.machine*h;
+
+// 表示範囲外はスキップ
+if(x+w<offsetX || x>offsetX+c.width)return;
+
+// ★ 色を設定
+if(e.isBoost){
+ctx.fillStyle=colors.boostBar; // 青(初期発電)
+}else if(e.delayed){
+ctx.fillStyle=colors.delayedBar; // オレンジ(遅延)
+}else{
+ctx.fillStyle=colors.normalBar; // 緑(通常)
+}
+ctx.fillRect(x,y,w,h-2);
+
+// 中央に時間表示(ズーム時は小さいバーには表示しない)
+if(w>30){
+ctx.fillStyle=colors.timelineText;
+ctx.fillText(
+`${e.start.toFixed(0)}-${e.end.toFixed(0)}`,
+x+3,
+y+h/2+4
+);
+}
+});
+
+ctx.restore();
+}
+
+
+// ======================
+// 蓄電グラフ描画
+// ======================
+function drawGraph(log,timeLog,limitTime,events,exactValues){
+
+if(log.length===0)return;
+
+let c=graph;
+let ctx=c.getContext("2d");
+let colors = getThemeColors();
+
+// 背景色をクリア
+ctx.fillStyle = colors.canvasBg;
+ctx.fillRect(0, 0, c.width, c.height);
+
+// ズーム・スクロール状態を取得
+let state = window.graphState;
+let zoom = state.zoom;
+let offsetX = state.offsetX;
+
+// シミュレーション計画時間をベースにスケール(ズーム適用)
+let baseScale=c.width/limitTime;
+let scale=baseScale*zoom;
+
+let sy=c.height/100000;
+
+ctx.save();
+ctx.translate(-offsetX, 0);
+
+// ★ グリッド線を描画(グラフより先に描画)
+if(document.getElementById('showGrid').checked){
+let gridInterval = +document.getElementById('gridInterval').value || 100;
+ctx.strokeStyle=colors.gridLine;
+ctx.lineWidth=1;
+ctx.setLineDash([5, 5]);
+
+// 表示範囲を計算
+let startTime = Math.floor(offsetX / scale / gridInterval) * gridInterval;
+let endTime = Math.ceil((offsetX + c.width) / scale / gridInterval) * gridInterval;
+
+for(let t = startTime; t <= endTime; t += gridInterval){
+if(t < 0) continue;
+let x = t * scale;
+ctx.beginPath();
+ctx.moveTo(x, 0);
+ctx.lineTo(x, c.height);
+ctx.stroke();
+
+// 時刻ラベルを表示
+ctx.fillStyle=colors.gridText;
+ctx.font="10px sans-serif";
+ctx.textAlign="center";
+ctx.fillText(`${t}s`, x, c.height - 5);
+}
+
+ctx.setLineDash([]);
+}
+
+// グラフの線を描画
+ctx.strokeStyle=colors.graphLine;
+ctx.lineWidth=2;
+ctx.beginPath();
+let started=false;
+log.forEach((v,i)=>{
+let x=timeLog[i]*scale; // 時刻ベースのX座標
+let y=c.height-v*sy;
+
+// 表示範囲外はスキップ(ただし線の連続性は保つ)
+if(x>=-100 && x<=offsetX+c.width+100){
+if(!started){
+ctx.moveTo(x,y);
+started=true;
+}else{
+ctx.lineTo(x,y);
+}
+}
+});
+ctx.stroke();
+
+// イベント時刻(発電開始/終了)に正確な貯蔵量を表示
+ctx.font="10px sans-serif";
+ctx.fillStyle=colors.text;
+ctx.textAlign="center";
+
+// exactValuesから値を取得して表示
+exactValues.forEach((value, time) => {
+let x = time * scale;
+// 表示範囲内のみ描画
+if(x>=offsetX-50 && x<=offsetX+c.width+50){
+let y = c.height - value * sy;
+ctx.fillText(`${value.toFixed(0)}`, x, y - 5);
+}
+});
+
+ctx.restore();
+}
+
+
+const countEl=document.getElementById("count");
+const powerEl=document.getElementById("power");
+const onEl=document.getElementById("on");
+const loadEl=document.getElementById("load");
+const boostEl=document.getElementById("boost");
+
+// ======================
+// ズーム・スクロール機能
+// ======================
+function setupZoomScroll(canvas, stateKey, otherStateKey) {
+let state = window[stateKey];
+let otherState = window[otherStateKey];
+let isDragging = false;
+let startX = 0;
+let startOffsetX = 0;
+
+// リンクモードかチェック
+function isLinked() {
+return document.getElementById('linkZoom').checked;
+}
+
+// マウスホイールでズーム
+canvas.addEventListener('wheel', (e) => {
+e.preventDefault();
+let delta = e.deltaY > 0 ? 0.9 : 1.1;
+let newZoom = state.zoom * delta;
+// ズーム範囲を制限 (0.5倍 ~ 20倍)
+newZoom = Math.max(0.5, Math.min(20, newZoom));
+
+// マウス位置を中心にズーム
+let rect = canvas.getBoundingClientRect();
+let mouseX = e.clientX - rect.left + state.offsetX;
+let ratio = mouseX / (canvas.width * state.zoom);
+state.zoom = newZoom;
+state.offsetX = ratio * canvas.width * state.zoom - (e.clientX - rect.left);
+
+// オフセットを制限
+let maxOffset = Math.max(0, canvas.width * state.zoom - canvas.width);
+state.offsetX = Math.max(0, Math.min(maxOffset, state.offsetX));
+
+// リンクモード時は他方も同期
+if (isLinked()) {
+otherState.zoom = newZoom;
+otherState.offsetX = state.offsetX;
+let otherMaxOffset = Math.max(0, canvas.width * otherState.zoom - canvas.width);
+otherState.offsetX = Math.max(0, Math.min(otherMaxOffset, otherState.offsetX));
+}
+
+redraw(); // 再描画
+});
+
+// ドラッグでスクロール
+canvas.addEventListener('mousedown', (e) => {
+isDragging = true;
+startX = e.clientX;
+startOffsetX = state.offsetX;
+canvas.style.cursor = 'grabbing';
+});
+
+canvas.addEventListener('mousemove', (e) => {
+if (!isDragging) return;
+let dx = startX - e.clientX;
+state.offsetX = startOffsetX + dx;
+
+// オフセットを制限
+let maxOffset = Math.max(0, canvas.width * state.zoom - canvas.width);
+state.offsetX = Math.max(0, Math.min(maxOffset, state.offsetX));
+
+// リンクモード時は他方も同期
+if (isLinked()) {
+otherState.offsetX = state.offsetX;
+let otherMaxOffset = Math.max(0, canvas.width * otherState.zoom - canvas.width);
+otherState.offsetX = Math.max(0, Math.min(otherMaxOffset, otherState.offsetX));
+}
+
+redraw(); // 再描画
+});
+
+canvas.addEventListener('mouseup', () => {
+isDragging = false;
+canvas.style.cursor = 'grab';
+});
+
+canvas.addEventListener('mouseleave', () => {
+isDragging = false;
+canvas.style.cursor = 'default';
+});
+
+canvas.style.cursor = 'grab';
+}
+
+// タイムラインとグラフにズーム・スクロールを設定
+const timelineCanvas = document.getElementById('timeline');
+const graphCanvas = document.getElementById('graph');
+setupZoomScroll(timelineCanvas, 'timelineState', 'graphState');
+setupZoomScroll(graphCanvas, 'graphState', 'timelineState');
+
+// シミュレーション時間の手動設定チェックボックス
+document.getElementById('customTime').addEventListener('change', function() {
+document.getElementById('simTime').disabled = !this.checked;
+});
+
+// グリッド線の設定変更時に再描画
+document.getElementById('showGrid').addEventListener('change', function() {
+if(lastCalcResult) redraw();
+});
+document.getElementById('gridInterval').addEventListener('input', function() {
+if(lastCalcResult && document.getElementById('showGrid').checked) redraw();
+});
+
+</script>
+
+</body>
+</html>
